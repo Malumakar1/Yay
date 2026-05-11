@@ -20,6 +20,13 @@ I already created `.venv` and installed the dependencies in this workspace. If y
 pip install -r requirements.txt
 ```
 
+On another Windows computer, you can also just double-click:
+
+- `setup.bat` once, to create `.venv` and install dependencies
+- `run.bat` whenever you want to run the app
+- `run_dry_test.bat` to test detection without pressing keys
+- `run_with_delay.bat` to run with an 8-24 ms random delay
+
 ## Run
 
 ```powershell
