@@ -68,6 +68,8 @@ Run against the real game without pressing keys:
 
 Turn it on with `F8`. When the timing matches, the console should print `would press 3` or the current detected digit.
 
+The debug window draws a thin circle and yellow cross over the prompt it has locked onto. If that circle is not on the actual game prompt, reselect a tighter capture region around the prompt.
+
 ## Optional Tiny Delay
 
 By default, the app presses as soon as the red segment enters the blue segment.

@@ -26,6 +26,9 @@ class Detection:
     digit_confidence: float
     red_pixels: int
     blue_pixels: int
+    center_x: float
+    center_y: float
+    radius: float
 
 
 @dataclass
@@ -113,13 +116,55 @@ def clean_mask(mask: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
-def ring_filter(mask: np.ndarray, cx: float, cy: float, min_ratio: float, max_ratio: float) -> np.ndarray:
+def ring_filter(mask: np.ndarray, cx: float, cy: float, radius: float, min_ratio: float, max_ratio: float) -> np.ndarray:
     height, width = mask.shape[:2]
     ys, xs = np.indices((height, width))
-    radius = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-    outer = min(width, height) * 0.5
-    keep = (radius >= outer * min_ratio) & (radius <= outer * max_ratio)
+    distance = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    keep = (distance >= radius * min_ratio) & (distance <= radius * max_ratio)
     return np.where(keep, mask, 0).astype(np.uint8)
+
+
+def find_prompt_circle(frame_bgr: np.ndarray) -> tuple[float, float, float]:
+    height, width = frame_bgr.shape[:2]
+    fallback = (width / 2.0, height / 2.0, min(width, height) * 0.42)
+
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    blurred = cv2.medianBlur(gray, 5)
+    min_radius = max(18, int(min(width, height) * 0.12))
+    max_radius = max(min_radius + 4, int(min(width, height) * 0.42))
+
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(30, min(width, height) * 0.35),
+        param1=70,
+        param2=18,
+        minRadius=min_radius,
+        maxRadius=max_radius,
+    )
+    if circles is None:
+        return fallback
+
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1]
+    best_circle: Optional[tuple[float, float, float]] = None
+    best_score = -1.0
+
+    for x, y, radius in np.round(circles[0, :]).astype(int):
+        if x < 0 or y < 0 or x >= width or y >= height:
+            continue
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.circle(mask, (x, y), int(radius), 255, 3)
+        ring_sat = cv2.mean(saturation, mask=mask)[0]
+        center_distance = math.hypot(x - width / 2.0, y - height / 2.0)
+        score = ring_sat + radius * 0.25 - center_distance * 0.02
+        if score > best_score:
+            best_score = score
+            best_circle = (float(x), float(y), float(radius))
+
+    return best_circle or fallback
 
 
 def build_digit_templates() -> dict[str, list[np.ndarray]]:
@@ -178,7 +223,7 @@ def best_center_component(binary: np.ndarray) -> Optional[np.ndarray]:
 
         component_center = np.array(centroids[label])
         distance = float(np.linalg.norm(component_center - center))
-        if distance > min(width, height) * 0.28:
+        if distance > min(width, height) * 0.42:
             continue
 
         score = float(area) - distance * 3.0
@@ -217,15 +262,19 @@ def score_digit_bitmap(candidate: np.ndarray, templates: dict[str, list[np.ndarr
     return best_digit, best_score
 
 
-def read_digit(frame_bgr: np.ndarray, templates: dict[str, list[np.ndarray]]) -> tuple[Optional[str], float]:
+def read_digit(
+    frame_bgr: np.ndarray,
+    templates: dict[str, list[np.ndarray]],
+    cx: float,
+    cy: float,
+    radius: float,
+) -> tuple[Optional[str], float]:
     height, width = frame_bgr.shape[:2]
-    size = int(min(width, height) * 0.45)
-    cx = width // 2
-    cy = height // 2
-    x1 = max(0, cx - size // 2)
-    x2 = min(width, cx + size // 2)
-    y1 = max(0, cy - size // 2)
-    y2 = min(height, cy + size // 2)
+    size = max(36, int(radius * 1.12))
+    x1 = max(0, int(cx - size // 2))
+    x2 = min(width, int(cx + size // 2))
+    y1 = max(0, int(cy - size // 2))
+    y2 = min(height, int(cy + size // 2))
     crop = frame_bgr[y1:y2, x1:x2]
 
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -253,16 +302,14 @@ def read_digit(frame_bgr: np.ndarray, templates: dict[str, list[np.ndarray]]) ->
 
 
 def detect(frame_bgr: np.ndarray, args: argparse.Namespace, templates: dict[str, list[np.ndarray]]) -> Detection:
-    height, width = frame_bgr.shape[:2]
-    cx = width / 2.0
-    cy = height / 2.0
+    cx, cy, radius = find_prompt_circle(frame_bgr)
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
     red1 = mask_by_hsv(hsv, args.red_hue_min, args.red_hue_max, args.red_sat_min, args.red_val_min)
     blue = mask_by_hsv(hsv, args.blue_hue_min, args.blue_hue_max, args.blue_sat_min, args.blue_val_min)
 
-    red = ring_filter(clean_mask(red1), cx, cy, args.ring_min_ratio, args.ring_max_ratio)
-    blue = ring_filter(clean_mask(blue), cx, cy, args.ring_min_ratio, args.ring_max_ratio)
+    red = ring_filter(clean_mask(red1), cx, cy, radius, args.ring_min_ratio, args.ring_max_ratio)
+    blue = ring_filter(clean_mask(blue), cx, cy, radius, args.ring_min_ratio, args.ring_max_ratio)
 
     red_ys, red_xs = np.where(red > 0)
     blue_ys, blue_xs = np.where(blue > 0)
@@ -282,7 +329,7 @@ def detect(frame_bgr: np.ndarray, args: argparse.Namespace, templates: dict[str,
         if red_angle is not None and target_start is not None and target_end is not None:
             inside = circular_contains(red_angle, target_start, target_end, args.inside_margin_deg)
 
-    digit, confidence = read_digit(frame_bgr, templates)
+    digit, confidence = read_digit(frame_bgr, templates, cx, cy, radius)
     return Detection(
         inside=inside,
         digit=digit,
@@ -292,15 +339,20 @@ def detect(frame_bgr: np.ndarray, args: argparse.Namespace, templates: dict[str,
         digit_confidence=confidence,
         red_pixels=red_pixels,
         blue_pixels=blue_pixels,
+        center_x=cx,
+        center_y=cy,
+        radius=radius,
     )
 
 
 def draw_debug(frame: np.ndarray, detection: Detection, active: bool) -> np.ndarray:
     out = frame.copy()
-    height, width = out.shape[:2]
-    cx = int(width / 2)
-    cy = int(height / 2)
-    radius = int(min(width, height) * 0.42)
+    cx = int(detection.center_x)
+    cy = int(detection.center_y)
+    radius = int(detection.radius)
+
+    cv2.circle(out, (cx, cy), radius, (80, 80, 80), 1, cv2.LINE_AA)
+    cv2.drawMarker(out, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 10, 1)
 
     if detection.target_start is not None and detection.target_end is not None:
         cv2.ellipse(
@@ -325,7 +377,7 @@ def draw_debug(frame: np.ndarray, detection: Detection, active: bool) -> np.ndar
         f"{status} inside={detection.inside} digit={detection.digit or '?'} "
         f"conf={detection.digit_confidence:.2f} red={detection.red_pixels} blue={detection.blue_pixels}"
     )
-    cv2.rectangle(out, (0, 0), (width, 28), (0, 0, 0), -1)
+    cv2.rectangle(out, (0, 0), (out.shape[1], 28), (0, 0, 0), -1)
     cv2.putText(out, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA)
     return out
 
@@ -508,8 +560,8 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--press-cooldown", type=float, help="Minimum seconds between key presses. Overrides config.ini.")
     parser.add_argument("--inside-margin-deg", type=float, help="Positive expands timing, negative waits deeper inside target. Overrides config.ini.")
-    parser.add_argument("--ring-min-ratio", type=float, help="Inner ring filter as fraction of ROI radius. Overrides config.ini.")
-    parser.add_argument("--ring-max-ratio", type=float, help="Outer ring filter as fraction of ROI radius. Overrides config.ini.")
+    parser.add_argument("--ring-min-ratio", type=float, help="Inner ring filter as fraction of detected prompt radius. Overrides config.ini.")
+    parser.add_argument("--ring-max-ratio", type=float, help="Outer ring filter as fraction of detected prompt radius. Overrides config.ini.")
     parser.add_argument("--min-red-pixels", type=int)
     parser.add_argument("--min-blue-pixels", type=int)
     parser.add_argument("--red-hue-min", type=int)
@@ -532,8 +584,8 @@ def apply_config_defaults(args: argparse.Namespace) -> argparse.Namespace:
         "delay_ms": (0.0, 0.0),
         "press_cooldown": 0.35,
         "inside_margin_deg": 0.0,
-        "ring_min_ratio": 0.35,
-        "ring_max_ratio": 0.95,
+        "ring_min_ratio": 0.55,
+        "ring_max_ratio": 1.35,
         "min_red_pixels": 12,
         "min_blue_pixels": 25,
         "red_hue_min": 170,
