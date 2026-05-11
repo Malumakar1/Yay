@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import math
 import random
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Optional
 
 import cv2
@@ -374,6 +376,24 @@ def parse_delay_ms(raw: str) -> tuple[float, float]:
     raise argparse.ArgumentTypeError("--delay-ms must be off, one number, or min,max")
 
 
+def load_config(path: str) -> dict[str, str]:
+    config_path = Path(path)
+    if not config_path.exists():
+        return {}
+
+    parser = configparser.ConfigParser()
+    parser.read(config_path)
+    if "settings" not in parser:
+        return {}
+    return dict(parser["settings"])
+
+
+def config_bool(config: dict[str, str], key: str, default: bool) -> bool:
+    if key not in config:
+        return default
+    return config[key].strip().lower() in {"1", "yes", "true", "on"}
+
+
 def bgr_from_hsv(hue: int, sat: int, val: int) -> tuple[int, int, int]:
     hsv = np.array([[[hue, sat, val]]], dtype=np.uint8)
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
@@ -473,38 +493,85 @@ def run_self_test(args: argparse.Namespace, templates: dict[str, list[np.ndarray
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Toggleable screen-capture key assist for a local timing prompt.")
+    parser.add_argument("--config", default="config.ini", help="Path to config file. Default: config.ini.")
     parser.add_argument("--roi", help="Capture region as left,top,width,height. If omitted, you select it on startup.")
-    parser.add_argument("--toggle-key", default="f8", help="Global hotkey for on/off. Default: f8.")
-    parser.add_argument("--quit-key", default="f12", help="Global hotkey to quit. Default: f12.")
+    parser.add_argument("--toggle-key", help="Global hotkey for on/off. Overrides config.ini.")
+    parser.add_argument("--quit-key", help="Global hotkey to quit. Overrides config.ini.")
     parser.add_argument("--debug", action="store_true", help="Show a live debug window.")
     parser.add_argument("--dry-run", action="store_true", help="Print intended key presses without pressing keys.")
     parser.add_argument("--self-test", action="store_true", help="Run generated shade/digit detection checks and exit.")
-    parser.add_argument("--fps", type=float, default=60.0, help="Capture loop target FPS.")
+    parser.add_argument("--fps", type=float, help="Capture loop target FPS. Overrides config.ini.")
     parser.add_argument(
         "--delay-ms",
         type=parse_delay_ms,
-        default=(0.0, 0.0),
-        help="Optional random delay before pressing, e.g. off, 12, or 8,24. Default: off.",
+        help="Optional random delay before pressing, e.g. off, 12, or 8,24. Overrides config.ini.",
     )
-    parser.add_argument("--press-cooldown", type=float, default=0.35, help="Minimum seconds between key presses.")
-    parser.add_argument("--inside-margin-deg", type=float, default=0.0, help="Positive expands timing, negative waits deeper inside target.")
-    parser.add_argument("--ring-min-ratio", type=float, default=0.35, help="Inner ring filter as fraction of ROI radius.")
-    parser.add_argument("--ring-max-ratio", type=float, default=0.95, help="Outer ring filter as fraction of ROI radius.")
-    parser.add_argument("--min-red-pixels", type=int, default=12)
-    parser.add_argument("--min-blue-pixels", type=int, default=25)
-    parser.add_argument("--red-hue-min", type=int, default=170)
-    parser.add_argument("--red-hue-max", type=int, default=10)
-    parser.add_argument("--red-sat-min", type=int, default=70)
-    parser.add_argument("--red-val-min", type=int, default=70)
-    parser.add_argument("--blue-hue-min", type=int, default=90)
-    parser.add_argument("--blue-hue-max", type=int, default=135)
-    parser.add_argument("--blue-sat-min", type=int, default=50)
-    parser.add_argument("--blue-val-min", type=int, default=60)
+    parser.add_argument("--press-cooldown", type=float, help="Minimum seconds between key presses. Overrides config.ini.")
+    parser.add_argument("--inside-margin-deg", type=float, help="Positive expands timing, negative waits deeper inside target. Overrides config.ini.")
+    parser.add_argument("--ring-min-ratio", type=float, help="Inner ring filter as fraction of ROI radius. Overrides config.ini.")
+    parser.add_argument("--ring-max-ratio", type=float, help="Outer ring filter as fraction of ROI radius. Overrides config.ini.")
+    parser.add_argument("--min-red-pixels", type=int)
+    parser.add_argument("--min-blue-pixels", type=int)
+    parser.add_argument("--red-hue-min", type=int)
+    parser.add_argument("--red-hue-max", type=int)
+    parser.add_argument("--red-sat-min", type=int)
+    parser.add_argument("--red-val-min", type=int)
+    parser.add_argument("--blue-hue-min", type=int)
+    parser.add_argument("--blue-hue-max", type=int)
+    parser.add_argument("--blue-sat-min", type=int)
+    parser.add_argument("--blue-val-min", type=int)
     return parser
 
 
+def apply_config_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    config = load_config(args.config)
+    defaults = {
+        "toggle_key": "f8",
+        "quit_key": "f12",
+        "fps": 60.0,
+        "delay_ms": (0.0, 0.0),
+        "press_cooldown": 0.35,
+        "inside_margin_deg": 0.0,
+        "ring_min_ratio": 0.35,
+        "ring_max_ratio": 0.95,
+        "min_red_pixels": 12,
+        "min_blue_pixels": 25,
+        "red_hue_min": 170,
+        "red_hue_max": 10,
+        "red_sat_min": 70,
+        "red_val_min": 70,
+        "blue_hue_min": 90,
+        "blue_hue_max": 135,
+        "blue_sat_min": 50,
+        "blue_val_min": 60,
+    }
+
+    for key, default in defaults.items():
+        current = getattr(args, key)
+        if current is not None:
+            continue
+        raw = config.get(key, None)
+        if raw is None:
+            setattr(args, key, default)
+        elif key == "delay_ms":
+            setattr(args, key, parse_delay_ms(raw))
+        elif isinstance(default, int):
+            setattr(args, key, int(raw))
+        elif isinstance(default, float):
+            setattr(args, key, float(raw))
+        else:
+            setattr(args, key, raw)
+
+    if not args.debug:
+        args.debug = config_bool(config, "debug", False)
+    if not args.dry_run:
+        args.dry_run = config_bool(config, "dry_run", False)
+
+    return args
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    args = make_parser().parse_args(argv)
+    args = apply_config_defaults(make_parser().parse_args(argv))
     state = RuntimeState()
     templates = build_digit_templates()
 

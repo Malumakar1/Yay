@@ -27,6 +27,17 @@ On another Windows computer, you can also just double-click:
 - `run_dry_test.bat` to test detection without pressing keys
 - `run_with_delay.bat` to run with an 8-24 ms random delay
 
+## Change Hotkeys
+
+Open `config.ini` in Notepad and change:
+
+```ini
+toggle_key = f6
+quit_key = f12
+```
+
+Examples that work well: `f6`, `f7`, `f9`, `home`, `end`, `insert`, `delete`.
+
 ## Run
 
 ```powershell
